@@ -365,38 +365,35 @@ extension TextDecoding {
     ) {
         let tensorShape = keyTensor.shape.map { $0.intValue }
         let sliceShape = keySlice.shape.map { $0.intValue }
-        let sliceStrides = keySlice.strides.map { $0.intValue }  // same for val
-        let bytesPerSample = MemoryLayout<FloatType>.size
 
-        keyTensor.withUnsafeMutableBytes { keyTensorPointer, keyTargetStrides in
-            keySlice.withUnsafeBytes { keySlicePointer in
-                valueTensor.withUnsafeMutableBytes { valueTensorPointer, valueTargetStrides in
-                    valueSlice.withUnsafeBytes { valueSlicePointer in
-                        // Assuming batch size is always 1
-                        DispatchQueue.concurrentPerform(iterations: tensorShape[1]) { j in
+        // Assuming batch size is always 1
+        DispatchQueue.concurrentPerform(iterations: tensorShape[1]) { j in
+            keySlice.getBytesWithHandler { keySliceBytes in
+                keyTensor.getBytesWithHandler { keyTensorBytes in
+                    valueSlice.getBytesWithHandler { valueSliceBytes in
+                        valueTensor.getBytesWithHandler { valueTensorBytes in
                             // Slice size is 3 for prefill and 1 for decode loops
                             for k in 0..<sliceShape[3] {
-                                // Equivalent to:
-                                // `tensor[0, j, 0, k + index] = slice[0, j, 0, k + index]`
-                                let keyDestIndex =
-                                    j * keyTargetStrides[1] + (index + k) * keyTargetStrides[3]
-                                let keyDest =
-                                    keyTensorPointer.baseAddress! + keyDestIndex * bytesPerSample
+                                let keySliceOffset = j * sliceShape[3] + k
+                                let keyTensorOffset = j * tensorShape[3] + (index + k)
 
-                                let keySliceIndex = j * sliceStrides[1] + k * sliceStrides[3]
-                                let keySlice =
-                                    keySlicePointer.baseAddress! + keySliceIndex * bytesPerSample
-                                memcpy(keyDest, keySlice, bytesPerSample)
+                                // Copy key cache data
+                                let keySliceValue = keySliceBytes.load(
+                                    fromByteOffset: keySliceOffset * MemoryLayout<Float16>.size,
+                                    as: Float16.self)
+                                keyTensorBytes.storeBytes(
+                                    of: keySliceValue,
+                                    toByteOffset: keyTensorOffset * MemoryLayout<Float16>.size,
+                                    as: Float16.self)
 
-                                let valDestIndex =
-                                    j * valueTargetStrides[1] + (index + k) * valueTargetStrides[3]
-                                let valDest =
-                                    valueTensorPointer.baseAddress! + valDestIndex * bytesPerSample
-
-                                let valSliceIndex = j * sliceStrides[1] + k * sliceStrides[3]
-                                let valSlice =
-                                    valueSlicePointer.baseAddress! + valSliceIndex * bytesPerSample
-                                memcpy(valDest, valSlice, bytesPerSample)
+                                // Copy value cache data
+                                let valueSliceValue = valueSliceBytes.load(
+                                    fromByteOffset: keySliceOffset * MemoryLayout<Float16>.size,
+                                    as: Float16.self)
+                                valueTensorBytes.storeBytes(
+                                    of: valueSliceValue,
+                                    toByteOffset: keyTensorOffset * MemoryLayout<Float16>.size,
+                                    as: Float16.self)
                             }
                         }
                     }
@@ -411,22 +408,17 @@ extension TextDecoding {
         insertAtIndex tokenIndex: Int
     ) {
         let tensorShape = alignmentTensor.shape.map { $0.intValue }
-        let sliceStrides = alignmentSlice.strides.map { $0.intValue }
-        let bytesPerSample = MemoryLayout<FloatType>.size
 
-        alignmentTensor.withUnsafeMutableBytes { alignmentPointer, alignmentStrides in
-            alignmentSlice.withUnsafeBytes { slicePointer in
+        alignmentSlice.getBytesWithHandler { sliceBytes in
+            alignmentTensor.getBytesWithHandler { tensorBytes in
                 // Process each column
                 for column in 0..<tensorShape[1] {
-                    // Calculate source and destination indices
-                    let destIndex =
-                        (tokenIndex + 1) * alignmentStrides[0] + column * alignmentStrides[1]
-                    let sourceIndex = column * sliceStrides[1]
-
-                    // Copy the weight value
-                    let dest = alignmentPointer.baseAddress! + destIndex * bytesPerSample
-                    let source = slicePointer.baseAddress! + sourceIndex * bytesPerSample
-                    memcpy(dest, source, bytesPerSample)
+                    let sliceValue = sliceBytes.load(
+                        fromByteOffset: column * MemoryLayout<Float16>.size, as: Float16.self)
+                    let tensorOffset =
+                        ((tokenIndex + 1) * tensorShape[1] + column) * MemoryLayout<Float16>.size
+                    tensorBytes.storeBytes(
+                        of: sliceValue, toByteOffset: tensorOffset, as: Float16.self)
                 }
             }
         }
